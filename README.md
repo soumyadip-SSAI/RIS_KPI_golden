@@ -49,8 +49,8 @@ python main.py
   `final_status` = `Closed` for `CLOSED` / `CANCELLED`, otherwise `Open` (also when there is no case).
 - **Status (intermediate):** a row is `Closed` only when every silver defect in it is `Closed`, else `Open`.
 - **Defect counts:** distinct breached defects (`breach_flag = 1`) per status, from the silver tables.
-- **Affected lengths:** defect rows come from the silver tables (breached rows; parents' `affected_length` for CA
-  and IRC, cracking `affected_length`, pothole 1 m each). `Total` rows come from `final_intermediate`.
+- **Affected lengths:** roughness / rutting defect rows and `Total` rows come from `final_intermediate`; cracking
+  (`affected_length`) and pothole (1 m each) come from the silver tables (breached rows); ravelling is 0.
 
 Full rules: [kpi_creation/readme.md](kpi_creation/readme.md#ris-view-logic).
 

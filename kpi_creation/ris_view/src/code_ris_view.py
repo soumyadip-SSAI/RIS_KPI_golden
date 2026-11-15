@@ -54,9 +54,9 @@ def run():
     children = {parent: children[child] for parent, child in CHILD_TABLES.items()}
     counts = count_defects(combine_defects(tables, children), project_info)
 
-    # --- 4. Affected lengths: defect rows from the silver tables with status,
-    #        'Total' rows from final_intermediate ---
-    defect_rows = attach_defect_lengths(counts, tables)
+    # --- 4. Affected lengths: roughness / rutting defect rows and 'Total' rows from final_intermediate,
+    #        cracking / pothole defect rows from the silver tables with status ---
+    defect_rows = attach_defect_lengths(counts, tables, intermediate)
     total_rows = build_total_rows(intermediate, defect_rows)
 
     # --- 5. Final table -> CSV ---

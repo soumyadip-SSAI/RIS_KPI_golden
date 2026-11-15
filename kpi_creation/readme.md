@@ -36,7 +36,7 @@ cd ris_trends         && python main.py
 | `db_data_extraction` | Postgres `dhms_staging.public`: `dlm_defect_case`, `udm_defect_reference`, `master_survey_system`, `survey_data_map`, `master_defect_type`, `wfm_survey_schedule`, `master_upc_project` | `input_data/raw_db_tables/<table>/<YYYY>/<MM>/<DD>/<table>.csv` (a second pull on the same day overwrites) |
 | `ris_view` 1. `src/code_silver_table_update.py` | latest `dlm_defect_case` / `udm_defect_reference` snapshot, silver defect tables in `input_data/old_silver_data` | `output_data/silver_data_with_status/*.csv` (+ `defect_reference_id`, `current_status`, `final_status`) |
 | `ris_view` 2. `src/code_intermediate_logic.py` | `input_data/old_silver_data` (parent / child tables, `master_chainage`, `upc_reporting_intervals`), `output_data/silver_data_with_status` | `output_data/output_kpi_data/final_intermediate.csv` |
-| `ris_view` 3. `src/code_ris_view.py` | `output_data/silver_data_with_status` (defect counts and lengths), child 10m tables in `input_data/old_silver_data` (IRC counts), `input_data/project_master.xlsx`, `final_intermediate.csv` (`Total` rows) | `output_data/output_kpi_data/ris_view_dw.csv` |
+| `ris_view` 3. `src/code_ris_view.py` | `output_data/silver_data_with_status` (defect counts, cracking / pothole lengths), child 10m tables in `input_data/old_silver_data` (IRC counts), `input_data/project_master.xlsx`, `final_intermediate.csv` (roughness / rutting lengths, `Total` rows) | `output_data/output_kpi_data/ris_view_dw.csv` |
 | `ris_trends` | `master_{roughness,rutting}_{parent,child_10m}`, `master_chainage`, `dlm_threshold_mapping` in `input_data/old_silver_data`, `input_data/project_master.xlsx` | `output_data/output_kpi_data/ris_trends_dw.csv` |
 
 Paths are relative to the `RIS_KPI_golden` folder. DB id columns (`UPC_ID`, `Survey_ID`, ...) are not created
@@ -87,14 +87,15 @@ Every grain gets an `Open` and a `Closed` row (0 when empty). `Total` rows sum t
 
 ### 4. RIS view affected lengths (`utils/affected_length.py`)
 
-Defect rows come from the silver tables with status; only rows with `breach_flag = 1` count, for Open and Closed
-alike. Chainages and reporting intervals are not used.
+| Defect | Source | `Affected_length_CA` | `Affected_Length_IRC` |
+|---|---|---|---|
+| Roughness / Rutting | `final_intermediate`, split by the row's `roughness_status` / `rutting_status` | `<defect>_ca_length` summed | `<defect>_irc_length` summed |
+| Ravelling | — | 0 (no ravelling length columns in `final_intermediate`) | 0 |
+| Cracking | silver table with status, `breach_flag = 1` rows, row's `final_status` | `affected_length` of 'As per CA' rows | `affected_length` of 'As per IRC' rows |
+| Pothole | silver table with status, `breach_flag = 1` rows, row's `final_status` | 1 m per 'As per CA' row (`FIXED_LENGTH_M`; its `affected_length` is an area in sqm) | 1 m per 'As per IRC' row (none today) |
 
-| Defect | `Affected_length_CA` | `Affected_Length_IRC` |
-|---|---|---|
-| Roughness / Rutting / Ravelling | parent `affected_length` | the same parent `affected_length` (parents are CA only and hold the status) |
-| Cracking | `affected_length` of 'As per CA' rows | `affected_length` of 'As per IRC' rows |
-| Pothole | 1 m per 'As per CA' row (`FIXED_LENGTH_M`; its `affected_length` is an area in sqm) | 1 m per 'As per IRC' row (none today) |
+The intermediate lengths come from each reporting-interval window's own flag (window metric vs threshold), at the
+CA / IRC reporting interval of the UPC.
 
 `Total` rows come from `final_intermediate`: `total_affected_length_ca` / `_irc` summed per UPC grain; a row is
 `Closed` only when its roughness, rutting and cracking statuses are all `Closed`, else `Open`.
