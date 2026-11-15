@@ -1,7 +1,6 @@
 # KPI creation
 
 Builds the RIS KPI tables `ris_view_dw` and `ris_trends_dw` from the DHMS database and the silver tables.
-Local (pandas) version of the Databricks notebooks.
 
 ## Setup
 
