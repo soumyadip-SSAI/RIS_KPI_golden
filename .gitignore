@@ -1,0 +1,3 @@
+# Data (large CSVs, DB snapshots): not committed
+input_data/
+output_data/

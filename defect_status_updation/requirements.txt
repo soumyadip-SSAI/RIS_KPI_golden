@@ -1,0 +1,10 @@
+# src/db_extraction.py
+SQLAlchemy>=2.0
+psycopg[binary]>=3.1
+python-dotenv>=1.0          # DB settings from db_data_extraction/.env
+pandas>=2.2
+
+# kpi_creation/ris_view, run by src/kpi_code_flow.py with the same Python
+numpy
+pyarrow>=15.0
+openpyxl

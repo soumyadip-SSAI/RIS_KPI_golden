@@ -1,0 +1,10 @@
+# db_data_extraction
+SQLAlchemy>=2.0
+psycopg[binary]>=3.1
+python-dotenv>=1.0          # DB settings from db_data_extraction/.env
+
+# all steps
+pandas>=2.2
+numpy
+pyarrow>=15.0
+openpyxl
