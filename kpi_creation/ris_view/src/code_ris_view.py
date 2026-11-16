@@ -10,7 +10,7 @@ DB id columns are not created here; they are added when the output is pushed to 
 import logging
 
 from utils import config
-from utils.affected_length import attach_defect_lengths, build_total_rows
+from utils.affected_length import attach_defect_lengths, build_total_rows, subtract_closed_from_open
 from utils.defect_counts import CHILD_COLUMNS, combine_defects, count_defects
 from utils.helpers import filter_upcs
 from utils.io_utils import load_defect_table, load_intermediate, save_csv
@@ -54,12 +54,13 @@ def run():
     children = {parent: children[child] for parent, child in CHILD_TABLES.items()}
     counts = count_defects(combine_defects(tables, children), project_info)
 
-    # --- 4. Affected lengths: roughness / rutting defect rows and 'Total' rows from final_intermediate,
-    #        cracking / pothole defect rows from the silver tables with status ---
+    # --- 4. Affected lengths per defect / status (source: LENGTH_SOURCE in utils/affected_length.py),
+    #        'Total' rows from final_intermediate ---
     defect_rows = attach_defect_lengths(counts, tables, intermediate)
     total_rows = build_total_rows(intermediate, defect_rows)
 
-    # --- 5. Final table -> CSV ---
+    # --- 5. Cracking: Open affected length minus Closed, then final table -> CSV ---
+    defect_rows = subtract_closed_from_open(defect_rows)
     ris_view_dw = build_ris_view_dw(defect_rows, total_rows)
     log.info("ris_view_dw — %s rows × %s cols", f"{len(ris_view_dw):,}", ris_view_dw.shape[1])
 

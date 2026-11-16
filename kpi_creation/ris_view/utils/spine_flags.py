@@ -2,6 +2,10 @@
 
 Every 10m spine segment that falls inside a defected interval (defect_flag = 1) in the
 defect report inherits that defect's flag; affected length = flag × segment length.
+
+majority_covered (used by final_intermediate, utils/interval_spine.py): a row gets flag 1 when at least
+MIN_COVERED_SHARE of its length lies inside defected intervals (adjacent / overlapping intervals are joined first),
+so rows at the edges of an interval that is not on the row grid are flagged when most of the row is defected.
 """
 import logging
 
@@ -17,6 +21,9 @@ JOIN_KEYS = ["upc", "phase", "cycle", "lane", "source_system", "detected_on"]
 SPINE_KEYS = JOIN_KEYS + ["pavement_type", "start_chainage", "end_chainage"]
 DEFECT_TYPES = ["roughness", "rutting", "cracking"]
 FLAG_TYPES = [f"{d}_{rt}" for d in DEFECT_TYPES for rt in ("ca", "irc")]
+
+# majority_covered: share of a row's length that must lie inside defected intervals for flag 1
+MIN_COVERED_SHARE = 0.5
 
 FINAL_COLUMNS = [
     "upc", "source_system", "defect_detected_on",
@@ -69,6 +76,53 @@ def covered(segments, intervals):
     )
     flags[matched.loc[matched["_reach"] >= matched["_smax"], "_row"].to_numpy()] = 1
     return flags
+
+
+def _joined_intervals(intervals):
+    """Overlapping / adjacent intervals per JOIN_KEYS joined into one, with _before = metres of the joined
+    intervals of the same keys that lie before it."""
+    w = intervals.dropna(subset=["_min", "_max"]).sort_values(JOIN_KEYS + ["_min"], kind="stable")
+    by = [w[k] for k in JOIN_KEYS]
+    prev_reach = w["_max"].groupby(by, dropna=False).cummax().groupby(by, dropna=False).shift()
+    block = (prev_reach.isna() | (w["_min"] > prev_reach)).cumsum()
+    joined = w.groupby(block).agg(**{k: (k, "first") for k in JOIN_KEYS}, _min=("_min", "min"), _max=("_max", "max"))
+    length = joined["_max"] - joined["_min"]
+    joined["_before"] = length.groupby([joined[k] for k in JOIN_KEYS], dropna=False).cumsum() - length
+    return joined.sort_values("_min", kind="stable").reset_index(drop=True)
+
+
+def _covered_upto(points, joined):
+    """Metres of the joined intervals (same JOIN_KEYS) up to chainage _p, per point _row."""
+    m = pd.merge_asof(points[["_row", "_p"] + JOIN_KEYS].sort_values("_p", kind="stable"), joined,
+                      left_on="_p", right_on="_min", by=JOIN_KEYS, direction="backward")
+    inside = np.minimum(m["_p"], m["_max"]) - m["_min"]
+    return pd.Series((m["_before"] + inside).fillna(0.0).to_numpy(), index=m["_row"].to_numpy())
+
+
+def covered_metres(segments, intervals):
+    """Metres of each segment [_smin, _smax] that lie inside intervals [_min, _max] with the same JOIN_KEYS
+    (overlapping intervals counted once)."""
+    metres = np.zeros(len(segments))
+    if intervals.empty:
+        return metres
+    joined = _joined_intervals(intervals)
+    if joined.empty:
+        return metres
+    left = segments.dropna(subset=["_smin", "_smax"])
+    upto_end = _covered_upto(left.assign(_p=left["_smax"]), joined)
+    upto_start = _covered_upto(left.assign(_p=left["_smin"]), joined)
+    rows = left["_row"].to_numpy()
+    metres[rows] = (upto_end.reindex(rows).to_numpy() - upto_start.reindex(rows).to_numpy()).round(6)
+    return metres
+
+
+def majority_covered(segments, intervals, share=MIN_COVERED_SHARE):
+    """1 where at least `share` of a segment's length lies inside intervals with the same JOIN_KEYS (and more
+    than 0 m), else 0; e.g. interval 254537-254607 -> row 254530-254550 (13 of 20 m) = 1,
+    254550-254600 (50 of 50 m) = 1, 254600-254650 (7 of 50 m) = 0."""
+    metres = covered_metres(segments, intervals)
+    length = (segments["_smax"] - segments["_smin"]).to_numpy()
+    return ((metres > 0) & (metres >= share * length)).astype(int)
 
 
 def defected_windows(defect_report):

@@ -1,13 +1,25 @@
 """Affected lengths per defect row (Open / Closed) and for the Total rows.
 
-Defect rows (per UPC grain + defect_type + status):
-  Roughness / Rutting -> final_intermediate: <defect>_ca_length / <defect>_irc_length summed per <defect>_status
-                         of the intermediate row (empty status -> NO_STATUS_AS)
-  Ravelling           -> 0 (final_intermediate has no ravelling length columns)
-  Cracking            -> silver table with status, breached rows (breach_flag == 1): affected_length of the 10m
-                         row; 'As per CA' rows -> CA length, 'As per IRC' rows -> IRC length (row's final_status)
-  Pothole             -> silver table with status, breached rows: 1 m per row (its affected_length is the area
-                         in sqm), same CA / IRC split as cracking
+Defect rows (per UPC grain + defect_type + status); the source per defect and status is set in LENGTH_SOURCE:
+  "intermediate" -> final_intermediate: <defect>_ca_length / <defect>_irc_length summed per <defect>_status of the
+                    intermediate row (empty status -> NO_STATUS_AS); roughness / rutting / cracking only
+  "silver"       -> silver table with status, breached rows (breach_flag == 1), row's final_status:
+                      roughness / rutting / ravelling: affected_length of the parent row, for both CA and IRC
+                                (parent tables hold 'As per CA' rows only and carry the defect status)
+                      cracking: end_chainage - start_chainage of the row ('As per CA' rows -> CA,
+                                'As per IRC' rows -> IRC)
+                      pothole:  1 m per row (its affected_length is the area in sqm), same CA / IRC split
+  None           -> 0
+
+  Defect      Open           Closed
+  Roughness   intermediate   silver
+  Rutting     intermediate   silver
+  Ravelling   0              silver        (no ravelling length columns in final_intermediate)
+  Cracking    intermediate   silver
+  Pothole     0              silver        (no pothole length columns in final_intermediate)
+
+  Then, for SUBTRACT_CLOSED_FROM_OPEN (cracking), Open length = Open - Closed per UPC grain, CA and IRC
+  separately (subtract_closed_from_open, run just before ris_view_dw is built; clipped at 0).
 
 Total rows -> summed from total_affected_length_<std> of final_intermediate per UPC grain and status; a row is
               'Closed' only when roughness / rutting / cracking status are all Closed, else 'Open' (empty
@@ -33,15 +45,24 @@ DEFECT_LENGTH_COLUMNS = {
     "Rutting": ("rutting_ca_length", "rutting_irc_length", "rutting_status"),
     "Cracking": ("cracking_ca_length", "cracking_irc_length", "cracking_status"),
 }
-# defect rows whose lengths come from final_intermediate
-INTERMEDIATE_DEFECTS = ["Roughness", "Rutting"]
-# defect rows with no length source (no length columns in final_intermediate) -> 0
-NO_LENGTH_DEFECTS = {"Ravelling"}
+INTERMEDIATE, SILVER = "intermediate", "silver"
+# defect_type -> {status: length source}; None -> 0
+LENGTH_SOURCE = {
+    "Roughness": {"Open": INTERMEDIATE, "Closed": SILVER},
+    "Rutting": {"Open": INTERMEDIATE, "Closed": SILVER},
+    "Ravelling": {"Open": None, "Closed": SILVER},
+    "Cracking": {"Open": INTERMEDIATE, "Closed": SILVER},
+    "Pothole": {"Open": None, "Closed": SILVER},
+}
 
-# defect rows whose lengths come from the silver tables with status (breached rows only)
-SILVER_COLUMN_DEFECTS = {"Cracking"}  # affected_length of the row
-FIXED_LENGTH_M = {"Pothole": 1}       # fixed length per row (pothole affected_length is an area)
+# defect types whose Open length is reduced by their Closed length (subtract_closed_from_open)
+SUBTRACT_CLOSED_FROM_OPEN = {"Cracking"}
+
+# silver length rules (breached rows only)
+PARENT_DEFECTS = {"Roughness", "Rutting", "Ravelling"}  # LENGTH_COLUMN of the parent row, for CA and IRC
 LENGTH_COLUMN = "affected_length"
+SPAN_DEFECTS = {"Cracking"}      # end_chainage - start_chainage of the row
+FIXED_LENGTH_M = {"Pothole": 1}  # fixed length per row (pothole affected_length is an area)
 CA, IRC = "As per CA", "As per IRC"
 
 UPC_GRAIN = ["upc", "source_system", "detected_on", "phase", "cycle"]
@@ -54,12 +75,11 @@ def _with_km(out):
 
 
 def intermediate_defect_lengths(intermediate):
-    """Roughness / rutting lengths per UPC grain + status (<defect>_status of the intermediate row;
+    """Roughness / rutting / cracking lengths per UPC grain + status (<defect>_status of the intermediate row;
     empty -> NO_STATUS_AS)."""
     rows = intermediate.rename(columns={"defect_detected_on": "detected_on"})
     parts = []
-    for defect in INTERMEDIATE_DEFECTS:
-        ca_col, irc_col, status_col = DEFECT_LENGTH_COLUMNS[defect]
+    for defect, (ca_col, irc_col, status_col) in DEFECT_LENGTH_COLUMNS.items():
         part = (rows.assign(status=rows[status_col].astype("string").fillna(NO_STATUS_AS))
                 .groupby(UPC_GRAIN + ["status"], dropna=False)
                 .agg(affected_length_ca_m=(ca_col, "sum"), affected_length_irc_m=(irc_col, "sum"))
@@ -69,24 +89,32 @@ def intermediate_defect_lengths(intermediate):
 
 
 def _silver_rows(name, df):
-    """Breached cracking / pothole rows of one silver table with their CA / IRC length (m) and status."""
-    df = df[~df["defect_type"].isin(set(INTERMEDIATE_DEFECTS) | NO_LENGTH_DEFECTS)]
-    unknown = sorted(set(df["defect_type"].dropna()) - SILVER_COLUMN_DEFECTS - set(FIXED_LENGTH_M))
-    if unknown:
-        raise ValueError(f"{name}: no length rule for defect_type {', '.join(map(str, unknown))}")
-
+    """Breached rows of one silver table with their CA / IRC length (m) and status (defect types without a silver
+    length rule are skipped)."""
+    df = df[df["defect_type"].isin(PARENT_DEFECTS | SPAN_DEFECTS | set(FIXED_LENGTH_M))]
     rows = df[df["breach_flag"] == 1].drop_duplicates(UPC_GRAIN + ["defect_type", "threshold_name", "id"])
-    if rows["defect_type"].isin(SILVER_COLUMN_DEFECTS).any() and LENGTH_COLUMN not in rows.columns:
-        raise ValueError(f"{name}: no {LENGTH_COLUMN} column")
-    fixed = rows["defect_type"].map(FIXED_LENGTH_M).astype("float64")
-    measured = (pd.to_numeric(rows[LENGTH_COLUMN], errors="coerce").fillna(0.0)
-                if LENGTH_COLUMN in rows.columns else pd.Series(0.0, index=rows.index))
-    length = fixed.fillna(measured)
+
+    def _numeric(col):
+        if col not in rows.columns:
+            raise ValueError(f"{name}: no {col} column")
+        return pd.to_numeric(rows[col], errors="coerce")
+
+    parent = rows["defect_type"].isin(PARENT_DEFECTS)
+    span = rows["defect_type"].isin(SPAN_DEFECTS)
+    length = rows["defect_type"].map(FIXED_LENGTH_M).astype("float64")
+    if parent.any():
+        length = length.where(~parent, _numeric(LENGTH_COLUMN))
+    if span.any():
+        length = length.where(~span, (_numeric("end_chainage") - _numeric("start_chainage")).abs())
+    length = length.fillna(0.0)
+
+    ca_row, irc_row = rows["threshold_name"] == CA, rows["threshold_name"] == IRC
     return pd.DataFrame({
         **{c: rows[c] for c in UPC_GRAIN + ["defect_type"]},
         "status": rows["final_status"].astype("string").fillna(NO_STATUS_AS),
-        "affected_length_ca_m": length.where(rows["threshold_name"] == CA, 0.0),
-        "affected_length_irc_m": length.where(rows["threshold_name"] == IRC, 0.0),
+        "affected_length_ca_m": length.where(ca_row, 0.0),
+        # parents: the 'As per CA' row is the only row and counts for IRC too
+        "affected_length_irc_m": length.where(irc_row | (parent & ca_row), 0.0),
     })
 
 
@@ -97,17 +125,49 @@ def silver_defect_lengths(tables):
             [["affected_length_ca_m", "affected_length_irc_m"]].sum().reset_index())
 
 
+def _pick_sources(lengths):
+    """Keep, per defect_type + status, only the rows of the source set in LENGTH_SOURCE."""
+    unknown = sorted(set(lengths["defect_type"].dropna()) - set(LENGTH_SOURCE))
+    if unknown:
+        raise ValueError(f"No LENGTH_SOURCE for defect_type {', '.join(map(str, unknown))}")
+    wanted = [LENGTH_SOURCE[d].get(s) for d, s in zip(lengths["defect_type"], lengths["status"])]
+    return lengths[lengths["source"].to_numpy() == pd.Series(wanted, dtype="object").to_numpy()]
+
+
 def attach_defect_lengths(counts, tables, intermediate):
-    """Per-defect affected lengths joined on the UPC grain + defect_type + status: roughness / rutting from
-    final_intermediate, cracking / pothole from the silver tables, ravelling 0; grains without lengths get 0."""
-    lengths = _with_km(pd.concat([intermediate_defect_lengths(intermediate), silver_defect_lengths(tables)],
-                                 ignore_index=True))
-    log.info("aff_len_df — %s rows (roughness / rutting: intermediate, cracking / pothole: silver)",
-             f"{len(lengths):,}")
+    """Per-defect affected lengths joined on the UPC grain + defect_type + status, each defect / status taken from
+    its LENGTH_SOURCE (final_intermediate or the silver tables; None -> 0); grains without lengths get 0."""
+    lengths = pd.concat([intermediate_defect_lengths(intermediate).assign(source=INTERMEDIATE),
+                         silver_defect_lengths(tables).assign(source=SILVER)], ignore_index=True)
+    lengths = _with_km(_pick_sources(lengths).drop(columns="source"))
+    log.info("aff_len_df — %s rows (sources per defect / status: LENGTH_SOURCE)", f"{len(lengths):,}")
 
     out = counts.merge(lengths, on=UPC_GRAIN + ["defect_type", "status"], how="left", validate="one_to_one")
     out[LENGTH_COLS] = out[LENGTH_COLS].fillna(0)
     log.info("ris_view_df5 — %s rows × %s cols", f"{len(out):,}", out.shape[1])
+    return out
+
+
+def subtract_closed_from_open(defect_rows):
+    """For SUBTRACT_CLOSED_FROM_OPEN defects: Open affected length (m, km) = Open - Closed of the same UPC grain,
+    CA and IRC separately; a negative result is logged and set to 0."""
+    out = defect_rows.copy()
+    key = UPC_GRAIN + ["defect_type"]
+    target = out["defect_type"].isin(SUBTRACT_CLOSED_FROM_OPEN)
+    is_open = (target & (out["status"] == "Open")).to_numpy()
+    m_cols = ["affected_length_ca_m", "affected_length_irc_m"]
+
+    closed = out.loc[target & (out["status"] == "Closed"), key + m_cols]
+    closed_len = out[key].merge(closed, on=key, how="left", validate="many_to_one")[m_cols].fillna(0.0)
+    for std in ("ca", "irc"):
+        col = f"affected_length_{std}_m"
+        new = out[col].to_numpy() - closed_len[col].to_numpy()
+        negative = is_open & (new < 0)
+        if negative.any():
+            log.warning("%s: Closed > Open on %s rows — Open set to 0", col, int(negative.sum()))
+        out.loc[is_open, col] = new[is_open].clip(min=0)
+        out[f"affected_length_{std}_km"] = out[col] / 1000
+    log.info("Open affected length minus Closed for %s", ", ".join(sorted(SUBTRACT_CLOSED_FROM_OPEN)))
     return out
 
 

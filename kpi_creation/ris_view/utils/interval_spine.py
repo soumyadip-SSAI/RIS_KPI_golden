@@ -8,7 +8,10 @@ defect report's averaged windows; the first / last window of a run is cut to the
 Flags (flag_interval_spine) come from a defect report: per defect / standard the window comes from the parent
 (interval 1000), child 100m (interval 100) or the child 10m averaged to the interval when the parent / child 100m
 has no rows for that standard; 50 m windows come from the child 10m measures (utils/measure_windows.py).
-A row gets flag 1 when it lies fully inside a window with defect_flag = 1 (same rule as final_intermediate).
+A row gets flag 1 when at least half of it (MIN_COVERED_SHARE) lies inside windows with defect_flag = 1 of the same
+upc / phase / cycle / lane / source_system / detected_on (majority overlap; adjacent windows are joined), so the
+edge rows of a window that is not on the row grid (e.g. child 100m 254537-254607 on a 50 m grid) are flagged when
+most of the row is breached. Affected length = flag x the row's own length (end - start).
 """
 import logging
 
@@ -16,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 from utils.helpers import upc_slash
-from utils.spine_flags import DEFECT_TYPES, FLAG_TYPES, covered, defected_windows
+from utils.spine_flags import DEFECT_TYPES, FLAG_TYPES, defected_windows, majority_covered
 
 log = logging.getLogger(__name__)
 
@@ -105,9 +108,9 @@ def build_interval_spine(chainage_df, ri, default_interval):
 
 
 def flag_interval_spine(spine, defect_report):
-    """spine + a 0/1 flag per defect and standard, defect_<std>_flag = 1 if any of them is 1, and the affected
-    lengths <defect>_<std>_length = flag x spine_interval, total_affected_length_<std> = defect_<std>_flag x
-    spine_interval."""
+    """spine + a 0/1 flag per defect and standard (majority overlap with the defected windows), defect_<std>_flag
+    = 1 if any of them is 1, and the affected lengths <defect>_<std>_length = flag x row length,
+    total_affected_length_<std> = defect_<std>_flag x row length (row length = end_chainage - start_chainage)."""
     spine = spine.reset_index(drop=True)
     segments = pd.DataFrame({
         **{k: spine[k] for k in ("upc", "phase", "cycle", "lane", "source_system")},
@@ -120,14 +123,15 @@ def flag_interval_spine(spine, defect_report):
 
     out = spine.copy()
     for dt in FLAG_TYPES:
-        out[f"{dt}_flag"] = covered(segments, defected[defected["_dt"] == dt])
+        out[f"{dt}_flag"] = majority_covered(segments, defected[defected["_dt"] == dt])
     for rt in ("ca", "irc"):
         out[f"defect_{rt}_flag"] = out[[f"{d}_{rt}_flag" for d in DEFECT_TYPES]].max(axis=1)
 
+    row_length = (segments["_smax"] - segments["_smin"]).fillna(0.0).to_numpy()
     for rt in ("ca", "irc"):
         for d in DEFECT_TYPES:
-            out[f"{d}_{rt}_length"] = out[f"{d}_{rt}_flag"] * out["spine_interval"]
-        out[f"total_affected_length_{rt}"] = out[f"defect_{rt}_flag"] * out["spine_interval"]
+            out[f"{d}_{rt}_length"] = out[f"{d}_{rt}_flag"] * row_length
+        out[f"total_affected_length_{rt}"] = out[f"defect_{rt}_flag"] * row_length
 
     out = out[list(spine.columns) + FLAG_COLUMNS + LENGTH_COLUMNS]
     for col in FLAG_COLUMNS:
